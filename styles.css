@@ -76,6 +76,15 @@ body { background: var(--bg); color: var(--text); font-family: var(--font); font
 .fi-row:last-child { border-bottom: none; }
 .fi-k { color: var(--dim); } .fi-v { font-weight: 600; }
 
+/* Hover callsign label */
+.leaflet-tooltip.plane-tip {
+  background: var(--panel); color: var(--text); border: 1px solid var(--border);
+  border-radius: 6px; font-size: 11px; font-weight: 700; letter-spacing: 0.2px;
+  padding: 2px 7px; box-shadow: 0 2px 8px rgba(0,0,0,0.5); white-space: nowrap;
+  backdrop-filter: blur(8px); -webkit-backdrop-filter: blur(8px);
+}
+.leaflet-tooltip.plane-tip::before { display: none; }
+
 /* Leaflet dark overrides */
 .leaflet-container { background: #060910; font-family: var(--font); }
 .leaflet-control-zoom a { background: var(--panel) !important; color: var(--text) !important; border-color: var(--border) !important; }

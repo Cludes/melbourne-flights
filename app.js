@@ -5,6 +5,7 @@ const CONFIG = {
   ZOOM: 4, MIN_ZOOM: 3, MAX_ZOOM: 11,
   API: '/api/flights',
   REFRESH_MS: 20000,
+  TRAIL_MAX: 40,
   TILE: 'https://{s}.basemaps.cartocdn.com/dark_all/{z}/{x}/{y}{r}.png',
   ATTR: '&copy; <a href="https://www.openstreetmap.org/copyright">OpenStreetMap</a> &copy; <a href="https://carto.com/attributions">CARTO</a> | ADS-B: <a href="https://adsb.lol">adsb.lol</a>',
 };
@@ -24,13 +25,42 @@ function altColor(alt) {
   return '#FF5A8A';
 }
 
+// ── Solar terminator (night-side polygon) ──────────────────────────────────────
+const D2R = Math.PI / 180, R2D = 180 / Math.PI;
+function sunPos(date) {
+  const jd = date.getTime() / 86400000 + 2440587.5;
+  const T = jd - 2451545.0;
+  const g = (357.529 + 0.98560028 * T) * D2R;
+  const q = 280.459 + 0.98564736 * T;
+  const L = (q + 1.915 * Math.sin(g) + 0.020 * Math.sin(2 * g)) * D2R;
+  const e = (23.439 - 0.00000036 * T) * D2R;
+  const ra = Math.atan2(Math.cos(e) * Math.sin(L), Math.cos(L)) * R2D;
+  const dec = Math.asin(Math.sin(e) * Math.sin(L)) * R2D;
+  const gmst = (18.697374558 + 24.06570982441908 * T) % 24;
+  return { ra, dec, gmst };
+}
+function terminatorPolygon(date) {
+  const { ra, dec, gmst } = sunPos(date);
+  const pts = [];
+  for (let lng = -180; lng <= 180; lng += 2) {
+    const ha = (gmst * 15 + lng - ra) * D2R;
+    const lat = Math.atan(-Math.cos(ha) / Math.tan(dec * D2R)) * R2D;
+    pts.push([lat, lng]);
+  }
+  const darkPole = dec > 0 ? -90 : 90; // pole in 24h darkness
+  pts.push([darkPole, 180], [darkPole, -180]);
+  return pts;
+}
+
 class FlightMap {
   constructor() {
     this.map = null;
     this.group = null;
-    this.planes = new Map();   // hex -> { fromLat,fromLng,toLat,toLng,curLat,curLng,track,alt,t0,lastSeen,data }
+    this.planes = new Map();   // hex -> { ...interp, track, alt, trail:[], data }
     this.markers = new Map();  // hex -> { marker, el }
     this.selected = null;
+    this.terminator = null;
+    this.trailLine = null;
     this.timer = null;
     this._raf = null;
   }
@@ -48,8 +78,21 @@ class FlightMap {
       minZoom: CONFIG.MIN_ZOOM, maxZoom: CONFIG.MAX_ZOOM, zoomControl: true,
     });
     L.tileLayer(CONFIG.TILE, { attribution: CONFIG.ATTR, subdomains: 'abcd', maxZoom: 20 }).addTo(this.map);
+    this.updateTerminator();
+    setInterval(() => this.updateTerminator(), 60000);
     this.group = L.layerGroup().addTo(this.map);
     this.map.on('click', () => this.closeInfo());
+  }
+
+  updateTerminator() {
+    const pts = terminatorPolygon(new Date());
+    if (this.terminator) {
+      this.terminator.setLatLngs(pts);
+    } else {
+      this.terminator = L.polygon(pts, {
+        stroke: false, fillColor: '#01030f', fillOpacity: 0.34, interactive: false, className: 'terminator',
+      }).addTo(this.map);
+    }
   }
 
   async fetchFlights() {
@@ -69,25 +112,27 @@ class FlightMap {
           ex.fromLat = ex.curLat; ex.fromLng = ex.curLng;
           ex.toLat = a.lat; ex.toLng = a.lon;
           ex.track = a.track; ex.alt = a.alt; ex.t0 = now; ex.lastSeen = now; ex.data = a;
+          ex.trail.push([a.lat, a.lon]);
+          if (ex.trail.length > CONFIG.TRAIL_MAX) ex.trail.shift();
         } else {
           this.planes.set(a.hex, {
             fromLat: a.lat, fromLng: a.lon, toLat: a.lat, toLng: a.lon,
             curLat: a.lat, curLng: a.lon, track: a.track, alt: a.alt,
-            t0: now, lastSeen: now, data: a,
+            t0: now, lastSeen: now, data: a, trail: [[a.lat, a.lon]],
           });
         }
       }
-      // drop stale (gone for >3 refreshes)
       for (const [hex, p] of this.planes) {
         if (!seen.has(hex) && now - p.lastSeen > CONFIG.REFRESH_MS * 3) {
           this.planes.delete(hex); this.removeMarker(hex);
+          if (this.selected === hex) this.closeInfo();
         }
       }
 
       this.setCount(this.planes.size);
       this.setUpdated(data.fetched_at);
       this.setStatus('ok');
-      if (this.selected && this.planes.has(this.selected)) this.renderInfo(this.selected);
+      if (this.selected && this.planes.has(this.selected)) { this.renderInfo(this.selected); this.drawTrail(this.selected); }
     } catch (e) {
       console.error('[flights] fetch failed:', e.message);
       this.setStatus('err');
@@ -124,7 +169,9 @@ class FlightMap {
       el.style.transform = `rotate(${rot}deg)`;
       el.innerHTML = PLANE_SVG;
       const icon = L.divIcon({ html: el, className: '', iconSize: [22, 22], iconAnchor: [11, 11] });
-      const marker = L.marker(latlng, { icon, zIndexOffset: 400 });
+      const marker = L.marker(latlng, { icon, zIndexOffset: 400, riseOnHover: true });
+      const label = (p.data.flight || p.data.reg || hex.toUpperCase());
+      marker.bindTooltip(label, { direction: 'top', offset: [0, -8], className: 'plane-tip', opacity: 1 });
       marker.on('click', (e) => { L.DomEvent.stopPropagation(e); this.showInfo(hex); });
       this.group.addLayer(marker);
       this.markers.set(hex, { marker, el });
@@ -135,11 +182,21 @@ class FlightMap {
     if (this.markers.has(hex)) { this.group.removeLayer(this.markers.get(hex).marker); this.markers.delete(hex); }
   }
 
+  drawTrail(hex) {
+    const p = this.planes.get(hex);
+    if (!p || !p.trail || p.trail.length < 2) { this.clearTrail(); return; }
+    const style = { color: altColor(p.alt), weight: 2.5, opacity: 0.6, className: 'trail' };
+    if (this.trailLine) this.trailLine.setLatLngs(p.trail).setStyle(style);
+    else { this.trailLine = L.polyline(p.trail, style).addTo(this.map); this.trailLine.bringToFront(); }
+  }
+  clearTrail() { if (this.trailLine) { this.map.removeLayer(this.trailLine); this.trailLine = null; } }
+
   showInfo(hex) {
     if (this.selected && this.markers.has(this.selected)) this.markers.get(this.selected).el.classList.remove('sel');
     this.selected = hex;
     if (this.markers.has(hex)) this.markers.get(hex).el.classList.add('sel');
     this.renderInfo(hex);
+    this.drawTrail(hex);
     document.getElementById('info').classList.remove('hidden');
   }
 
@@ -166,6 +223,7 @@ class FlightMap {
   closeInfo() {
     if (this.selected && this.markers.has(this.selected)) this.markers.get(this.selected).el.classList.remove('sel');
     this.selected = null;
+    this.clearTrail();
     document.getElementById('info').classList.add('hidden');
   }
 
