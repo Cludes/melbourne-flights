@@ -1,10 +1,10 @@
 'use strict';
 
 const CONFIG = {
-  CENTER: [-37.8136, 144.9631],
-  ZOOM: 8, MIN_ZOOM: 6, MAX_ZOOM: 12,
+  CENTER: [-28.3, 134.0],
+  ZOOM: 4, MIN_ZOOM: 3, MAX_ZOOM: 11,
   API: '/api/flights',
-  REFRESH_MS: 10000,
+  REFRESH_MS: 20000,
   TILE: 'https://{s}.basemaps.cartocdn.com/dark_all/{z}/{x}/{y}{r}.png',
   ATTR: '&copy; <a href="https://www.openstreetmap.org/copyright">OpenStreetMap</a> &copy; <a href="https://carto.com/attributions">CARTO</a> | ADS-B: <a href="https://adsb.lol">adsb.lol</a>',
 };

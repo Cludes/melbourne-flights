@@ -1,21 +1,44 @@
 /**
  * Cloudflare Pages Function - GET /api/flights
  *
- * Proxies the keyless adsb.lol community ADS-B feed (which sends no CORS), adds
- * CORS, trims it to what the map needs, and edge-caches for 10s so all visitors
- * share one upstream fetch (polite to the free API).
+ * Australia-wide live aircraft. The keyless community ADS-B APIs cap each query at
+ * ~250nm, so we fetch a grid of points across the populated arc + interior, merge and
+ * de-dupe by ICAO hex. Each point tries several keyless aggregators in order (they
+ * rate-limit Cloudflare's shared egress IPs differently). Adds CORS, edge-caches 20s.
  */
 
-// Keyless community ADS-B aggregators, all returning the same {ac:[...]} shape.
-// Tried in order until one responds 200 - they rate-limit Cloudflare's shared
-// egress IPs differently, so a fallback chain keeps the feed alive.
-const SOURCES = [
-  'https://opendata.adsb.fi/api/v2/lat/-37.8136/lon/144.9631/dist/130',
-  'https://api.airplanes.live/v2/point/-37.8136/144.9631/130',
-  'https://api.adsb.lol/v2/lat/-37.8136/lon/144.9631/dist/130',
+const UA = 'australia-flights/1.0 (+https://melbourne-flights.pages.dev)';
+const CACHE_TTL = 20;
+
+// [lat, lon, radius_nm] - capitals + interior, ~250nm each, covering populated Australia.
+const POINTS = [
+  [-31.95, 115.86, 250], // Perth
+  [-34.0, 138.0, 250],   // Adelaide / west VIC
+  [-39.0, 146.0, 250],   // Melbourne / Tasmania / Bass Strait
+  [-34.0, 150.5, 250],   // Sydney / ACT / NSW
+  [-27.5, 152.0, 250],   // Brisbane / SE QLD
+  [-19.0, 146.0, 250],   // Townsville / north QLD
+  [-13.5, 131.5, 250],   // Darwin / Top End
+  [-24.0, 134.0, 250],   // Alice Springs / interior
 ];
-const UA = 'melbourne-flights/1.0 (+https://melbourne-flights.pages.dev)';
-const CACHE_TTL = 10;
+
+const HOSTS = [
+  (la, lo, d) => `https://opendata.adsb.fi/api/v2/lat/${la}/lon/${lo}/dist/${d}`,
+  (la, lo, d) => `https://api.airplanes.live/v2/point/${la}/${lo}/${d}`,
+  (la, lo, d) => `https://api.adsb.lol/v2/lat/${la}/lon/${lo}/dist/${d}`,
+];
+
+async function fetchPoint([la, lo, d]) {
+  for (const host of HOSTS) {
+    try {
+      const r = await fetch(host(la, lo, d), { headers: { 'User-Agent': UA, 'Accept': 'application/json' } });
+      if (!r.ok) continue;
+      const j = await r.json();
+      if (j && Array.isArray(j.ac)) return j.ac;
+    } catch (e) { /* try next host */ }
+  }
+  return [];
+}
 
 export async function onRequestOptions() {
   return cors(new Response(null, { status: 204 }));
@@ -23,42 +46,37 @@ export async function onRequestOptions() {
 
 export async function onRequestGet(context) {
   const cache = caches.default;
-  const cacheKey = new Request(new URL(context.request.url).origin + '/__flights', { method: 'GET' });
+  const cacheKey = new Request(new URL(context.request.url).origin + '/__flights_au', { method: 'GET' });
   const cached = await cache.match(cacheKey);
   if (cached) return cors(cached);
 
-  let data = null;
-  let lastStatus = 0;
-  for (const src of SOURCES) {
-    try {
-      const up = await fetch(src, { headers: { 'User-Agent': UA, 'Accept': 'application/json' } });
-      lastStatus = up.status;
-      if (!up.ok) continue;
-      const j = await up.json();
-      if (j && Array.isArray(j.ac)) { data = j; break; }
-    } catch (e) { /* try next source */ }
-  }
-  if (!data) return cors(json({ error: `all upstream sources failed (last HTTP ${lastStatus})` }, 502));
+  const results = await Promise.all(POINTS.map(fetchPoint));
 
+  const seen = new Set();
   const aircraft = [];
-  for (const a of data.ac || []) {
-    if (a.lat == null || a.lon == null) continue;
-    const onGround = a.alt_baro === 'ground';
-    if (onGround) continue; // map shows airborne traffic
-    aircraft.push({
-      hex:    a.hex,
-      flight: (a.flight || '').trim() || null,
-      reg:    a.r || null,
-      type:   a.t || null,
-      lat:    a.lat,
-      lon:    a.lon,
-      alt:    typeof a.alt_baro === 'number' ? a.alt_baro : (a.alt_geom ?? null),
-      speed:  a.gs ?? null,                       // knots
-      track:  a.track ?? a.true_heading ?? null,  // degrees
-      vsi:    a.baro_rate ?? a.geom_rate ?? null, // ft/min
-      squawk: a.squawk || null,
-    });
+  for (const arr of results) {
+    for (const a of arr) {
+      if (a.lat == null || a.lon == null) continue;
+      if (a.alt_baro === 'ground') continue;
+      if (seen.has(a.hex)) continue;
+      seen.add(a.hex);
+      aircraft.push({
+        hex: a.hex,
+        flight: (a.flight || '').trim() || null,
+        reg: a.r || null,
+        type: a.t || null,
+        lat: a.lat,
+        lon: a.lon,
+        alt: typeof a.alt_baro === 'number' ? a.alt_baro : (a.alt_geom ?? null),
+        speed: a.gs ?? null,
+        track: a.track ?? a.true_heading ?? null,
+        vsi: a.baro_rate ?? a.geom_rate ?? null,
+        squawk: a.squawk || null,
+      });
+    }
   }
+
+  if (!aircraft.length) return cors(json({ error: 'all upstream sources failed' }, 502));
 
   const resp = json({ fetched_at: new Date().toISOString(), count: aircraft.length, aircraft });
   resp.headers.set('Cache-Control', `public, max-age=${CACHE_TTL}`);
