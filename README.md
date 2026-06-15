@@ -22,4 +22,4 @@ is edge-cached for 20s so all visitors share one upstream sweep. Typically ~300 
 - **Deploy** - GitHub Action ships the site + Function to Cloudflare Pages on every push to `master`
   (secrets `CLOUDFLARE_API_TOKEN` + `CLOUDFLARE_ACCOUNT_ID`).
 
-Live: https://melbourne-flights.pages.dev  (repo/project still named `melbourne-flights`)
+Live: https://australia-flights.pages.dev

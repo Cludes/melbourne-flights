@@ -25,4 +25,4 @@ jobs:
           apiToken: ${{ secrets.CLOUDFLARE_API_TOKEN }}
           accountId: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
           # functions/ at repo root is compiled and bundled automatically (no npm deps).
-          command: pages deploy dist --project-name=melbourne-flights --branch=master
+          command: pages deploy dist --project-name=australia-flights --branch=master

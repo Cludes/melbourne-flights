@@ -7,7 +7,7 @@
  * rate-limit Cloudflare's shared egress IPs differently). Adds CORS, edge-caches 20s.
  */
 
-const UA = 'australia-flights/1.0 (+https://melbourne-flights.pages.dev)';
+const UA = 'australia-flights/1.0 (+https://australia-flights.pages.dev)';
 const CACHE_TTL = 20;
 
 // [lat, lon, radius_nm] - capitals + interior, ~250nm each, covering populated Australia.
