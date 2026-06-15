@@ -6,7 +6,15 @@
  * share one upstream fetch (polite to the free API).
  */
 
-const SRC = 'https://api.adsb.lol/v2/lat/-37.8136/lon/144.9631/dist/130'; // ~240km around Melbourne
+// Keyless community ADS-B aggregators, all returning the same {ac:[...]} shape.
+// Tried in order until one responds 200 - they rate-limit Cloudflare's shared
+// egress IPs differently, so a fallback chain keeps the feed alive.
+const SOURCES = [
+  'https://opendata.adsb.fi/api/v2/lat/-37.8136/lon/144.9631/dist/130',
+  'https://api.airplanes.live/v2/point/-37.8136/144.9631/130',
+  'https://api.adsb.lol/v2/lat/-37.8136/lon/144.9631/dist/130',
+];
+const UA = 'melbourne-flights/1.0 (+https://melbourne-flights.pages.dev)';
 const CACHE_TTL = 10;
 
 export async function onRequestOptions() {
@@ -19,16 +27,18 @@ export async function onRequestGet(context) {
   const cached = await cache.match(cacheKey);
   if (cached) return cors(cached);
 
-  let upstream;
-  try {
-    upstream = await fetch(SRC, { headers: { 'User-Agent': 'melbourne-flights (cloudflare pages)' } });
-  } catch (e) {
-    return cors(json({ error: 'upstream fetch failed', detail: String(e) }, 502));
+  let data = null;
+  let lastStatus = 0;
+  for (const src of SOURCES) {
+    try {
+      const up = await fetch(src, { headers: { 'User-Agent': UA, 'Accept': 'application/json' } });
+      lastStatus = up.status;
+      if (!up.ok) continue;
+      const j = await up.json();
+      if (j && Array.isArray(j.ac)) { data = j; break; }
+    } catch (e) { /* try next source */ }
   }
-  if (!upstream.ok) return cors(json({ error: `upstream HTTP ${upstream.status}` }, 502));
-
-  let data;
-  try { data = await upstream.json(); } catch (e) { return cors(json({ error: 'bad upstream json' }, 502)); }
+  if (!data) return cors(json({ error: `all upstream sources failed (last HTTP ${lastStatus})` }, 502));
 
   const aircraft = [];
   for (const a of data.ac || []) {
